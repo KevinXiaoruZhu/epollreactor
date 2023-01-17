@@ -8,7 +8,9 @@
 #include <cerrno>
 #include "epoll_reactor_event.h"
 
+// global epoll fd
 int global_efd;
+// global MyEvent table
 MyEvent global_events[MAX_EVENTS + 1];
 
 void initlistensocket(int efd, unsigned short port);
@@ -46,7 +48,7 @@ int main(int argc, char *argv[]) {
         for (i = 0; i < 100; ++i, checkpos++) { // check 100 connections every while loop
             if (checkpos == MAX_EVENTS) checkpos = 0;
             // if not in epoll rb tree
-            if (global_events[checkpos].status != 1) continue;
+            if (global_events[checkpos].is_added_to_epoll != 1) continue;
 
             // non-active time for this client
             long duration = now - global_events[checkpos].last_active;
@@ -58,7 +60,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // listen epoll rb tree
+        // listen to epoll (rb tree) synchronously
         int ready_num = epoll_wait(global_efd, ep_events, MAX_EVENTS + 1, 1000);
         if (ready_num < 0) {
             printf("epoll_wait error, exit\n");
@@ -69,11 +71,12 @@ int main(int argc, char *argv[]) {
         for (i = 0; i < ready_num; ++i) {
             auto *my_evt = reinterpret_cast<MyEvent *>(ep_events[i].data.ptr);
 
-            if ((ep_events[i].events & EPOLLIN) && (my_evt->events & EPOLLIN)) {
-                my_evt->call_back(my_evt->fd, ep_events[i].events, my_evt->arg);
+            // reactor
+            if ((ep_events[i].events & EPOLLIN) && (my_evt->epoll_events & EPOLLIN)) {
+                my_evt->call_back(my_evt->fd, (int) ep_events[i].events, my_evt->arg);
             }
-            if ((ep_events[i].events & EPOLLOUT) && (my_evt->events & EPOLLOUT)) {
-                my_evt->call_back(my_evt->fd, ep_events[i].events, my_evt->arg);
+            if ((ep_events[i].events & EPOLLOUT) && (my_evt->epoll_events & EPOLLOUT)) {
+                my_evt->call_back(my_evt->fd, (int) ep_events[i].events, my_evt->arg);
             }
         }
     }
@@ -87,7 +90,9 @@ void initlistensocket(int efd, unsigned short port) {
     // set Non-block socket
     fcntl(listen_fd, F_SETFL, O_NONBLOCK);
 
+    // register listen fd & event to the end position of global MyEvent table
     global_events[MAX_EVENTS].set_event(listen_fd, &acceptconn, &global_events[MAX_EVENTS]);
+    // register listen fd & event to epoll
     global_events[MAX_EVENTS].add_event(efd, EPOLLIN);
 
     struct sockaddr_in sin{};
@@ -102,7 +107,7 @@ void initlistensocket(int efd, unsigned short port) {
 void acceptconn(int lfd, int events, void *arg) {
     struct sockaddr_in cin{};
     socklen_t len = sizeof(cin);
-    int cfd, i;
+    int cfd, i; // client fd, index of MyEvents
 
     if ((cfd = accept(lfd, (struct sockaddr *) &cin, &len)) == -1) {
         if (errno != EAGAIN && errno != EINTR) {
@@ -113,10 +118,12 @@ void acceptconn(int lfd, int events, void *arg) {
     }
 
     do {
+        // find the first available MyEvent
         for (i = 0; i < MAX_EVENTS; ++i) {
-            if (global_events[i].status == 0) break;
+            if (!global_events[i].is_added_to_epoll) break;
         }
 
+        // the last MyEvent is used for listen fd to accept new connections
         if (i == MAX_EVENTS) {
             printf("%s: max connection limit[%d]\n", __func__, MAX_EVENTS);
             break;
@@ -128,7 +135,9 @@ void acceptconn(int lfd, int events, void *arg) {
             break;
         }
 
+        // register this new client fd to global MyEvent table
         global_events[i].set_event(cfd, &recvdata, &global_events[i]);
+        // register event to epoll
         global_events[i].add_event(global_efd, EPOLLIN);
 
     } while (false);
@@ -142,7 +151,7 @@ void recvdata(int fd, int events, void *arg) {
     auto *my_evt = reinterpret_cast<MyEvent *>(arg);
     int len;
 
-    len = recv(fd, my_evt->buf, sizeof(my_evt->buf), 0);
+    len = (int) recv(fd, my_evt->buf, sizeof(my_evt->buf), 0);
 
     my_evt->delete_event(my_evt->fd);
 
@@ -151,6 +160,7 @@ void recvdata(int fd, int events, void *arg) {
         my_evt->buf[len] = '\0';
         printf("C[%d]:%s\n", fd, my_evt->buf);
 
+        // reactor: set fd to EPOLLOUT for sending out data later
         my_evt->set_event(fd, &senddata, my_evt);
         my_evt->add_event(global_efd, EPOLLOUT);
     } else if (len == 0) {
@@ -168,11 +178,13 @@ void senddata(int fd, int events, void *arg) {
     auto *my_evt = reinterpret_cast<MyEvent *>(arg);
     int len;
 
-    len = send(fd, my_evt->buf, my_evt->len, 0);
+    len = (int) send(fd, my_evt->buf, my_evt->len, 0);
 
     if (len > 0) {
         printf("send[fd=%d], length[%d]: %s\n", fd, len, my_evt->buf);
         my_evt->delete_event(global_efd);
+
+        // reactor: set fd to EPOLLIN for receiving data from client in the future
         my_evt->set_event(fd, &recvdata, my_evt);
         my_evt->add_event(global_efd, EPOLLIN);
     } else {

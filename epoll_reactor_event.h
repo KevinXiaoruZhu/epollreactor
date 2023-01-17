@@ -16,16 +16,16 @@ public:
 
     void set_event(int fd, void (*call_back)(int, int, void*), void* arg);
 
-    void add_event(int efd, int evts);
+    void add_event(int efd, int e_evts);
 
     void delete_event(int efd);
 
 public:
-    int fd; //
-    int events; //
+    int fd; // linux file descriptor
+    int epoll_events; // enum EPOLL_EVENTS in epoll.h (EPOLLIN, EPOLLOUT ...)
     void *arg; // callback function arguments
     void (*call_back)(int fd, int events, void *arg); // callback function
-    int status; // 1: event is on the epoll rb-tree, 0: not on the rb-tree
+    bool is_added_to_epoll; // 1: event is on the epoll rb-tree, 0: not on the rb-tree
     char buf[BUFLEN];
     int len; // buf length
     long last_active; // timestamp for the last active time
